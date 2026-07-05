@@ -1,0 +1,157 @@
+name: 量化筛选+AI分析
+
+on:
+  schedule:
+    - cron: '30 9 * * 1-5'   # UTC 09:30 = 北京时间 17:30（工作日）
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: '强制运行（跳过交易日检查）'
+        required: false
+        type: boolean
+        default: false
+      top_n:
+        description: '筛选股票数量'
+        required: false
+        type: string
+        default: '10'
+
+concurrency:
+  group: screened-stock-analysis
+  cancel-in-progress: false
+
+jobs:
+  # ── Job 1: 量化筛选 ──
+  screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      screened_list: ${{ steps.run_screen.outputs.screened_list }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install screening dependencies
+        run: pip install akshare pandas numpy
+
+      - name: Run stock screening
+        id: run_screen
+        env:
+          SCREEN_TOP_N: ${{ inputs.top_n || '10' }}
+          SCREEN_WORKERS: '10'
+        run: |
+          echo "开始量化筛选..."
+          python scripts/screen_stocks.py
+          echo "筛选完成，结果已写入 GITHUB_OUTPUT"
+          cat screened_stocks.txt
+
+      - name: Upload screening result
+        uses: actions/upload-artifact@v6
+        with:
+          name: screened-stocks
+          path: screened_stocks.txt
+          retention-days: 7
+
+  # ── Job 2: AI 深度分析 ──
+  analyze:
+    needs: screen
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(vars.ANALYSIS_TIMEOUT_MINUTES || '30') }}
+    environment: STOCK_LIST
+    steps:
+      - name: Random delay
+        run: sleep $((RANDOM % 60))
+
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create directories
+        run: mkdir -p data logs reports
+
+      - name: Run AI analysis on screened stocks
+        env:
+          GITHUB_ACTIONS: 'true'
+          REPORT_TYPE: 'simple'
+          LOG_LEVEL: 'INFO'
+          MAX_WORKERS: '1'
+          REPORT_LANGUAGE: 'zh'
+          MARKET_REVIEW_ENABLED: 'true'
+          MARKET_REVIEW_REGION: 'cn'
+          SINGLE_STOCK_NOTIFY: 'false'
+          GENERATION_BACKEND: ${{ vars.GENERATION_BACKEND || '' }}
+          LLM_TEMPERATURE: ${{ vars.LLM_TEMPERATURE || '0.7' }}
+          OPENAI_API_KEY: ${{ vars.OPENAI_API_KEY || secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || secrets.OPENAI_MODEL }}
+          LLM_PRIMARY_MODEL: ${{ vars.LLM_PRIMARY_MODEL || secrets.LLM_PRIMARY_MODEL || '' }}
+          LLM_PRIMARY_API_KEY: ${{ vars.LLM_PRIMARY_API_KEY || secrets.LLM_PRIMARY_API_KEY || '' }}
+          LLM_PRIMARY_BASE_URL: ${{ vars.LLM_PRIMARY_BASE_URL || secrets.LLM_PRIMARY_BASE_URL || '' }}
+          LLM_SECONDARY_MODEL: ${{ vars.LLM_SECONDARY_MODEL || secrets.LLM_SECONDARY_MODEL || '' }}
+          LLM_SECONDARY_API_KEY: ${{ vars.LLM_SECONDARY_API_KEY || secrets.LLM_SECONDARY_API_KEY || '' }}
+          LLM_SECONDARY_BASE_URL: ${{ vars.LLM_SECONDARY_BASE_URL || secrets.LLM_SECONDARY_BASE_URL || '' }}
+          LLM_VOLCENGINE_MODEL: ${{ vars.LLM_VOLCENGINE_MODEL || secrets.LLM_VOLCENGINE_MODEL || '' }}
+          LLM_VOLCENGINE_API_KEY: ${{ vars.LLM_VOLCENGINE_API_KEY || secrets.LLM_VOLCENGINE_API_KEY || '' }}
+          LLM_VOLCENGINE_BASE_URL: ${{ vars.LLM_VOLCENGINE_BASE_URL || secrets.LLM_VOLCENGINE_BASE_URL || '' }}
+          FEISHU_WEBHOOK_URL: ${{ vars.FEISHU_WEBHOOK_URL || secrets.FEISHU_WEBHOOK_URL }}
+          WECHAT_WEBHOOK_URL: ${{ vars.WECHAT_WEBHOOK_URL || secrets.WECHAT_WEBHOOK_URL || '' }}
+          DINGTALK_WEBHOOK_URL: ${{ vars.DINGTALK_WEBHOOK_URL || secrets.DINGTALK_WEBHOOK_URL || '' }}
+          ANSPIRE_API_KEYS: ${{ vars.ANSPIRE_API_KEYS || secrets.ANSPIRE_API_KEYS || '' }}
+          BOCHA_API_KEYS: ${{ vars.BOCHA_API_KEYS || secrets.BOCHA_API_KEYS || '' }}
+          TAVILY_API_KEYS: ${{ vars.TAVILY_API_KEYS || secrets.TAVILY_API_KEYS || '' }}
+          SERPAPI_API_KEYS: ${{ vars.SERPAPI_API_KEYS || secrets.SERPAPI_API_KEYS || '' }}
+          BRAVE_API_KEYS: ${{ vars.BRAVE_API_KEYS || secrets.BRAVE_API_KEYS || '' }}
+          MINIMAX_API_KEYS: ${{ vars.MINIMAX_API_KEYS || secrets.MINIMAX_API_KEYS || '' }}
+          SEARXNG_BASE_URLS: ${{ vars.SEARXNG_BASE_URLS || secrets.SEARXNG_BASE_URLS || '' }}
+          TUSHARE_TOKEN: ${{ vars.TUSHARE_TOKEN || secrets.TUSHARE_TOKEN || '' }}
+        run: |
+          SCREENED_LIST="${{ needs.screen.outputs.screened_list }}"
+          FORCE_RUN_ARG=""
+          if [ "${{ inputs.force_run }}" = "true" ]; then
+            FORCE_RUN_ARG="--force-run"
+          fi
+          echo "============================================"
+          echo "筛选结果: ${SCREENED_LIST}"
+          echo "============================================"
+          if [ -z "${SCREENED_LIST}" ]; then
+            echo "错误: 筛选结果为空，跳过分析"
+            exit 1
+          fi
+          export STOCK_LIST="${SCREENED_LIST}"
+          python main.py ${FORCE_RUN_ARG}
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: analysis-reports
+          path: |
+            reports/
+            logs/
+          retention-days: 30
+
+      - name: Show results
+        if: always()
+        run: |
+          echo "=== 生成的报告 ==="
+          ls -la reports/ 2>/dev/null || echo "reports/ 目录不存在"
+          echo ""
+          echo "=== 最近日志 ==="
+          if ls logs/*.log 1>/dev/null 2>&1; then
+            tail -30 logs/*.log
+          else
+            echo "无日志文件"
+          fi
